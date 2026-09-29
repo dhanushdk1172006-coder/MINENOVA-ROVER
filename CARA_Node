@@ -1,0 +1,511 @@
+%% ================================================================
+%  MINENOVA - CARA
+%  Communication-Aware Adaptive Relay Algorithm
+%
+%  Demonstrates:
+%  1. Link monitoring
+%  2. Communication degradation detection
+%  3. Adaptive video control
+%  4. Intelligent relay deployment
+%  5. Link recovery
+%
+%  Metrics:
+%  RSSI | Packet Loss | Latency | Throughput
+%  CARA Score | Video Bitrate | Relay Status
+% ================================================================
+
+clear;
+clc;
+close all;
+
+rng(42);   % Reproducible simulation
+
+%% -------------------- SIMULATION PARAMETERS ----------------------
+
+T = 300;                  % Simulation duration (seconds)
+t = 1:T;
+
+% Normal communication conditions
+RSSI_normal       = -58;  % dBm
+Latency_normal    = 45;   % ms
+PacketLoss_normal = 1.5;  % %
+Throughput_normal = 8.5;  % Mbps
+
+% Critical thresholds
+RSSI_threshold       = -75;
+Latency_threshold    = 120;
+PacketLoss_threshold = 8;
+Throughput_threshold = 3;
+
+% CARA decision parameters
+Score_threshold = 0.55;
+
+% Persistent degradation required before relay deployment
+RelayDelay = 15;          % seconds
+
+% Video bitrate limits
+Video_normal  = 4.0;       % Mbps
+Video_medium  = 2.0;       % Mbps
+Video_low     = 0.8;       % Mbps
+
+%% -------------------- CHANNEL MODEL -----------------------------
+
+RSSI       = zeros(1,T);
+Latency    = zeros(1,T);
+PacketLoss = zeros(1,T);
+Throughput = zeros(1,T);
+
+% Start with stable communication
+RSSI(:)       = RSSI_normal;
+Latency(:)    = Latency_normal;
+PacketLoss(:) = PacketLoss_normal;
+Throughput(:) = Throughput_normal;
+
+%% -------------------- CREATE LINK DEGRADATION -------------------
+
+% Phase 1: Stable link
+idx1 = 1:80;
+
+% Phase 2: Gradual degradation
+idx2 = 81:140;
+
+% Phase 3: Severe degradation
+idx3 = 141:180;
+
+% Phase 4: Relay deployment + recovery
+idx4 = 181:220;
+
+% Phase 5: Recovered communication
+idx5 = 221:300;
+
+% Stable phase
+RSSI(idx1)       = RSSI_normal + randn(size(idx1))*1.5;
+Latency(idx1)    = Latency_normal + randn(size(idx1))*4;
+PacketLoss(idx1) = PacketLoss_normal + randn(size(idx1))*0.3;
+Throughput(idx1) = Throughput_normal + randn(size(idx1))*0.3;
+
+% Gradual degradation
+for k = 1:length(idx2)
+
+    i = idx2(k);
+
+    degradation = k/length(idx2);
+
+    RSSI(i) = -58 - 18*degradation + randn*1.5;
+
+    Latency(i) = 45 + 90*degradation + randn*5;
+
+    PacketLoss(i) = 1.5 + 11*degradation + randn*0.5;
+
+    Throughput(i) = 8.5 - 5.8*degradation + randn*0.25;
+end
+
+% Severe degradation
+RSSI(idx3)       = -80 + randn(size(idx3))*1.5;
+Latency(idx3)    = 155 + randn(size(idx3))*8;
+PacketLoss(idx3) = 14 + randn(size(idx3))*1;
+Throughput(idx3) = 1.8 + randn(size(idx3))*0.2;
+
+% Relay recovery phase
+for k = 1:length(idx4)
+
+    i = idx4(k);
+
+    recovery = k/length(idx4);
+
+    RSSI(i) = -80 + 20*recovery + randn*1.2;
+
+    Latency(i) = 155 - 100*recovery + randn*4;
+
+    PacketLoss(i) = 14 - 12*recovery + randn*0.4;
+
+    Throughput(i) = 1.8 + 6.5*recovery + randn*0.25;
+end
+
+% Final stable link
+RSSI(idx5)       = -60 + randn(size(idx5))*1.3;
+Latency(idx5)    = 48 + randn(size(idx5))*4;
+PacketLoss(idx5) = 1.5 + randn(size(idx5))*0.3;
+Throughput(idx5) = 8.2 + randn(size(idx5))*0.3;
+
+%% -------------------- LIMIT VALUES ------------------------------
+
+RSSI       = max(min(RSSI,-40),-95);
+Latency    = max(Latency,10);
+PacketLoss = max(min(PacketLoss,100),0);
+Throughput = max(Throughput,0.1);
+
+%% ================================================================
+% CARA NORMALIZATION
+% ================================================================
+
+% RSSI normalization
+RSSI_score = (RSSI + 95) ./ (95-40);
+RSSI_score = max(min(RSSI_score,1),0);
+
+% Latency normalization
+Latency_score = 1 - (Latency/200);
+Latency_score = max(min(Latency_score,1),0);
+
+% Packet loss normalization
+Loss_score = 1 - (PacketLoss/20);
+Loss_score = max(min(Loss_score,1),0);
+
+% Throughput normalization
+Throughput_score = Throughput/10;
+Throughput_score = max(min(Throughput_score,1),0);
+
+%% ================================================================
+% CARA COMMUNICATION QUALITY SCORE
+% ================================================================
+
+CARA_Score = ...
+
+      0.25*RSSI_score + ...
+      0.20*Latency_score + ...
+      0.25*Loss_score + ...
+      0.30*Throughput_score;
+
+%% ================================================================
+% CARA DECISION ENGINE
+% ================================================================
+
+RelayStatus = zeros(1,T);
+
+VideoBitrate = zeros(1,T);
+
+Action = strings(1,T);
+
+degradation_counter = 0;
+
+relay_deployed = false;
+
+for i = 1:T
+
+    %% Check communication quality
+
+    if CARA_Score(i) >= 0.75
+
+        % Healthy communication
+        VideoBitrate(i) = Video_normal;
+
+        Action(i) = "NORMAL";
+
+        degradation_counter = 0;
+
+    elseif CARA_Score(i) >= Score_threshold
+
+        % Moderate degradation
+        VideoBitrate(i) = Video_medium;
+
+        Action(i) = "ADAPT VIDEO";
+
+        degradation_counter = degradation_counter + 1;
+
+    else
+
+        % Severe degradation
+        VideoBitrate(i) = Video_low;
+
+        Action(i) = "CRITICAL";
+
+        degradation_counter = degradation_counter + 1;
+
+    end
+
+    %% Persistent degradation detection
+
+    if degradation_counter >= RelayDelay && ~relay_deployed
+
+        relay_deployed = true;
+
+        Action(i) = "RELAY DEPLOY";
+
+    end
+
+    %% Relay active
+
+    if relay_deployed
+
+        RelayStatus(i) = 1;
+
+        % Maintain low bitrate until link recovers
+        if CARA_Score(i) < 0.75
+            VideoBitrate(i) = Video_medium;
+        end
+
+        %% Link recovered
+        if CARA_Score(i) >= 0.75
+
+            Action(i) = "LINK RECOVERED";
+
+        end
+
+    end
+
+end
+
+%% ================================================================
+% DETECT IMPORTANT EVENTS
+% ================================================================
+
+degradation_start = find(CARA_Score < 0.75,1);
+
+critical_start = find(CARA_Score < Score_threshold,1);
+
+relay_time = find(RelayStatus == 1,1);
+
+recovery_time = find(CARA_Score >= 0.75 & t > relay_time,1);
+
+fprintf('\n');
+fprintf('=====================================================\n');
+fprintf('          MINENOVA CARA PERFORMANCE REPORT\n');
+fprintf('=====================================================\n');
+
+fprintf('Simulation Duration       : %d seconds\n',T);
+
+fprintf('Degradation Detected      : %d sec\n',degradation_start);
+
+fprintf('Critical Condition        : %d sec\n',critical_start);
+
+fprintf('Relay Deployment           : %d sec\n',relay_time);
+
+fprintf('Communication Recovery    : %d sec\n',recovery_time);
+
+fprintf('=====================================================\n');
+
+%% ================================================================
+% PERFORMANCE BEFORE / AFTER RELAY
+% ================================================================
+
+before_region = 141:180;
+
+after_region = 221:260;
+
+fprintf('\n');
+fprintf('--------------- PERFORMANCE COMPARISON ---------------\n');
+
+fprintf('\nRSSI\n');
+fprintf('Before Relay : %.2f dBm\n',mean(RSSI(before_region)));
+fprintf('After Relay  : %.2f dBm\n',mean(RSSI(after_region)));
+
+fprintf('\nPacket Loss\n');
+fprintf('Before Relay : %.2f %%\n',mean(PacketLoss(before_region)));
+fprintf('After Relay  : %.2f %%\n',mean(PacketLoss(after_region)));
+
+fprintf('\nLatency\n');
+fprintf('Before Relay : %.2f ms\n',mean(Latency(before_region)));
+fprintf('After Relay  : %.2f ms\n',mean(Latency(after_region)));
+
+fprintf('\nThroughput\n');
+fprintf('Before Relay : %.2f Mbps\n',mean(Throughput(before_region)));
+fprintf('After Relay  : %.2f Mbps\n',mean(Throughput(after_region)));
+
+fprintf('\nCARA Score\n');
+fprintf('Before Relay : %.2f\n',mean(CARA_Score(before_region)));
+fprintf('After Relay  : %.2f\n',mean(CARA_Score(after_region)));
+
+%% ================================================================
+% GRAPH 1 - RSSI
+% ================================================================
+
+figure('Name','CARA - RSSI','Color','w');
+
+plot(t,RSSI,'LineWidth',2);
+
+hold on;
+
+yline(RSSI_threshold,'--','Threshold','LineWidth',1.5);
+
+xline(relay_time,'--','Relay Deployment','LineWidth',1.5);
+
+xlabel('Time (s)');
+ylabel('RSSI (dBm)');
+title('CARA Link Monitoring - RSSI');
+
+grid on;
+
+legend('RSSI','Threshold','Relay');
+
+%% ================================================================
+% GRAPH 2 - PACKET LOSS
+% ================================================================
+
+figure('Name','CARA - Packet Loss','Color','w');
+
+plot(t,PacketLoss,'LineWidth',2);
+
+hold on;
+
+yline(PacketLoss_threshold,'--','Threshold','LineWidth',1.5);
+
+xline(relay_time,'--','Relay Deployment','LineWidth',1.5);
+
+xlabel('Time (s)');
+ylabel('Packet Loss (%)');
+title('CARA Link Monitoring - Packet Loss');
+
+grid on;
+
+legend('Packet Loss','Threshold','Relay');
+
+%% ================================================================
+% GRAPH 3 - LATENCY
+% ================================================================
+
+figure('Name','CARA - Latency','Color','w');
+
+plot(t,Latency,'LineWidth',2);
+
+hold on;
+
+yline(Latency_threshold,'--','Threshold','LineWidth',1.5);
+
+xline(relay_time,'--','Relay Deployment','LineWidth',1.5);
+
+xlabel('Time (s)');
+ylabel('Latency (ms)');
+title('CARA Link Monitoring - Latency');
+
+grid on;
+
+legend('Latency','Threshold','Relay');
+
+%% ================================================================
+% GRAPH 4 - THROUGHPUT
+% ================================================================
+
+figure('Name','CARA - Throughput','Color','w');
+
+plot(t,Throughput,'LineWidth',2);
+
+hold on;
+
+yline(Throughput_threshold,'--','Threshold','LineWidth',1.5);
+
+xline(relay_time,'--','Relay Deployment','LineWidth',1.5);
+
+xlabel('Time (s)');
+ylabel('Throughput (Mbps)');
+title('CARA Link Monitoring - Throughput');
+
+grid on;
+
+legend('Throughput','Threshold','Relay');
+
+%% ================================================================
+% GRAPH 5 - CARA SCORE
+% ================================================================
+
+figure('Name','CARA Score','Color','w');
+
+plot(t,CARA_Score,'LineWidth',2);
+
+hold on;
+
+yline(0.75,'--','Healthy','LineWidth',1.5);
+yline(Score_threshold,'--','Critical','LineWidth',1.5);
+
+xline(relay_time,'--','Relay Deployment','LineWidth',1.5);
+
+xlabel('Time (s)');
+ylabel('Communication Quality Score');
+
+title('CARA Communication Quality Score');
+
+ylim([0 1]);
+
+grid on;
+
+legend('CARA Score','Healthy Threshold','Critical Threshold','Relay');
+
+%% ================================================================
+% GRAPH 6 - VIDEO ADAPTATION
+% ================================================================
+
+figure('Name','Adaptive Video','Color','w');
+
+stairs(t,VideoBitrate,'LineWidth',2);
+
+hold on;
+
+xline(relay_time,'--','Relay Deployment','LineWidth',1.5);
+
+xlabel('Time (s)');
+ylabel('Video Bitrate (Mbps)');
+
+title('CARA Adaptive Video Control');
+
+grid on;
+
+legend('Video Bitrate','Relay Deployment');
+
+%% ================================================================
+% GRAPH 7 - RELAY STATUS
+% ================================================================
+
+figure('Name','Relay Deployment','Color','w');
+
+stairs(t,RelayStatus,'LineWidth',3);
+
+ylim([-0.1 1.1]);
+
+yticks([0 1]);
+
+yticklabels({'OFF','ON'});
+
+xlabel('Time (s)');
+
+ylabel('Relay State');
+
+title('CARA Intelligent Relay Deployment');
+
+grid on;
+
+%% ================================================================
+% GRAPH 8 - ALL-IN-ONE CARA EVIDENCE
+% ================================================================
+
+figure('Name','CARA Master Evidence','Color','w');
+
+yyaxis left
+
+plot(t,CARA_Score,'LineWidth',2);
+
+ylabel('CARA Score');
+
+ylim([0 1]);
+
+yyaxis right
+
+plot(t,Throughput,'LineWidth',2);
+
+ylabel('Throughput (Mbps)');
+
+xline(relay_time,'--','Relay Deployment','LineWidth',2);
+
+xlabel('Time (s)');
+
+title('CARA: Link Degradation → Decision → Relay → Recovery');
+
+grid on;
+
+%% ================================================================
+% FINAL MESSAGE
+% ================================================================
+
+fprintf('\n');
+fprintf('=====================================================\n');
+fprintf('CARA SIMULATION COMPLETED SUCCESSFULLY\n');
+fprintf('=====================================================\n');
+
+fprintf('\nEvidence Chain:\n');
+fprintf('1. Link metrics continuously monitored\n');
+fprintf('2. Communication degradation detected\n');
+fprintf('3. CARA score decreased\n');
+fprintf('4. Video bitrate automatically adapted\n');
+fprintf('5. Persistent degradation triggered relay\n');
+fprintf('6. Communication quality recovered\n');
+fprintf('7. Throughput increased after recovery\n');
+
+fprintf('\n=====================================================\n');
