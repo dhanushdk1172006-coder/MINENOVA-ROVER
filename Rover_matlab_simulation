@@ -1,0 +1,1511 @@
+%% ================================================================
+% MINENOVA - AUTONOMOUS MINE RESCUE ROVER
+% LiDAR + Occupancy Grid + A* + Obstacle Avoidance
+%
+% COMPLETE STANDALONE MATLAB PROGRAM
+%
+% Features:
+%   1. Underground mine environment
+%   2. MineNova rover
+%   3. Virtual 2-D LiDAR
+%   4. Obstacle detection
+%   5. Occupancy grid
+%   6. A* path planning
+%   7. Autonomous obstacle avoidance
+%   8. Dynamic path replanning
+%   9. Survivor / rescue target
+%  10. Real-time animation
+%  11. Rover trail
+%  12. Mission statistics
+%
+% No external toolbox functions are required.
+%% ================================================================
+
+clear;
+clc;
+close all;
+
+%% ================================================================
+% PARAMETERS
+%% ================================================================
+
+mapW = 100;
+mapH = 70;
+
+% Rover
+roverRadius = 2.0;
+roverSpeed = 7.0;       % metres/second in simulation
+roverBodySize = 3.2;
+
+% LiDAR
+lidarRange = 18;
+numRays = 180;
+lidarStep = 0.20;
+
+% Simulation
+dt = 0.08;
+goalTolerance = 2.5;
+
+% Obstacle detection
+frontDetectionRange = 5.0;
+frontAngleDeg = 30;
+
+% A* path
+pathWaypointTolerance = 0.9;
+
+% Safety
+emergencyTurnAngle = pi/2;
+
+%% ================================================================
+% CREATE MINE MAP
+%% ================================================================
+
+% 0 = free
+% 1 = obstacle
+
+map = zeros(mapH,mapW);
+
+%% Outer mine boundary
+
+map(1,:) = 1;
+map(end,:) = 1;
+map(:,1) = 1;
+map(:,end) = 1;
+
+%% ================================================================
+% ROCK / DEBRIS FORMATIONS
+%% ================================================================
+
+% Left section
+map(12:19,18:30) = 1;
+map(28:36,10:22) = 1;
+map(42:50,20:32) = 1;
+
+% Middle section
+map(18:27,45:58) = 1;
+map(35:44,55:70) = 1;
+map(52:61,38:50) = 1;
+
+% Right section
+map(10:18,72:84) = 1;
+map(27:35,78:91) = 1;
+
+% Central debris
+map(43:51,67:78) = 1;
+
+% Irregular formations
+map(55:60,12:18) = 1;
+map(60:65,14:22) = 1;
+
+map(8:13,55:63) = 1;
+map(13:18,59:67) = 1;
+
+% Narrow passage obstacles
+map(22:28,32:38) = 1;
+map(50:56,78:84) = 1;
+
+%% Additional rocks
+
+map(8:12,28:35) = 1;
+map(36:40,35:42) = 1;
+map(58:63,65:72) = 1;
+map(20:24,65:71) = 1;
+
+%% ================================================================
+% START AND GOAL
+%% ================================================================
+
+start = [6 6];
+
+goal = [92 62];
+
+%% Make sure start and goal are free
+
+map = clearCircleFromMap(map,start,4);
+map = clearCircleFromMap(map,goal,4);
+
+%% ================================================================
+% INFLATE OBSTACLES
+%% ================================================================
+
+inflationRadius = ceil(roverRadius);
+
+inflatedMap = inflateMap(map,inflationRadius);
+
+% Guarantee start and goal are free
+inflatedMap = clearCircleFromMap(inflatedMap,start,2);
+inflatedMap = clearCircleFromMap(inflatedMap,goal,2);
+
+%% ================================================================
+% INITIAL A* PATH
+%% ================================================================
+
+path = astarPath(inflatedMap,start,goal);
+
+if isempty(path)
+
+    error(['No valid path was found from START to GOAL. ' ...
+           'Modify the obstacle layout.']);
+
+end
+
+%% ================================================================
+% FIGURE
+%% ================================================================
+
+fig = figure( ...
+    'Name','MINENOVA - Autonomous Mine Rescue', ...
+    'Color','k', ...
+    'Position',[40 40 1350 780]);
+
+ax = axes('Parent',fig);
+
+hold(ax,'on');
+
+axis(ax,[0 mapW 0 mapH]);
+axis(ax,'equal');
+
+set(ax, ...
+    'Color',[0.035 0.035 0.035], ...
+    'XColor','w', ...
+    'YColor','w', ...
+    'FontSize',10);
+
+xlabel(ax,'X Position (m)','Color','w');
+ylabel(ax,'Y Position (m)','Color','w');
+
+title(ax, ...
+    'MINENOVA | LiDAR Autonomous Navigation & Rescue', ...
+    'Color','w', ...
+    'FontSize',17, ...
+    'FontWeight','bold');
+
+%% ================================================================
+% DRAW OCCUPANCY MAP
+%% ================================================================
+
+imagesc(ax, ...
+    [0 mapW], ...
+    [0 mapH], ...
+    map);
+
+set(ax,'YDir','normal');
+
+colormap(ax, ...
+    [0.06 0.06 0.06;
+     0.35 0.35 0.35]);
+
+%% ================================================================
+% DRAW SOME ROCK MARKERS
+%% ================================================================
+
+drawRockMarkers(ax,map);
+
+%% ================================================================
+% START MARKER
+%% ================================================================
+
+startPlot = plot(ax, ...
+    start(1), ...
+    start(2), ...
+    'o', ...
+    'MarkerSize',12, ...
+    'MarkerFaceColor','w', ...
+    'MarkerEdgeColor','w', ...
+    'LineWidth',2);
+
+text(ax, ...
+    start(1)+2, ...
+    start(2), ...
+    'START / BASE', ...
+    'Color','w', ...
+    'FontSize',10, ...
+    'FontWeight','bold');
+
+%% ================================================================
+% SURVIVOR / GOAL
+%% ================================================================
+
+goalPlot = plot(ax, ...
+    goal(1), ...
+    goal(2), ...
+    'p', ...
+    'MarkerSize',20, ...
+    'MarkerFaceColor','w', ...
+    'MarkerEdgeColor','w', ...
+    'LineWidth',2);
+
+text(ax, ...
+    goal(1)+2, ...
+    goal(2), ...
+    'SURVIVOR / TARGET', ...
+    'Color','w', ...
+    'FontSize',11, ...
+    'FontWeight','bold');
+
+%% ================================================================
+% INITIAL A* PATH
+%% ================================================================
+
+plannedPathPlot = plot(ax, ...
+    path(:,1), ...
+    path(:,2), ...
+    '--', ...
+    'LineWidth',1.5);
+
+%% ================================================================
+% ROVER GRAPHICS
+%% ================================================================
+
+position = start;
+
+if size(path,1) >= 2
+
+    initialDirection = path(2,:) - path(1,:);
+
+else
+
+    initialDirection = goal - start;
+
+end
+
+heading = atan2( ...
+    initialDirection(2), ...
+    initialDirection(1));
+
+%% Rover body
+
+roverBody = rectangle(ax, ...
+    'Position',[ ...
+    position(1)-roverBodySize/2, ...
+    position(2)-roverBodySize/2, ...
+    roverBodySize, ...
+    roverBodySize], ...
+    'Curvature',0.25, ...
+    'LineWidth',2);
+
+%% Rover center
+
+roverCenter = plot(ax, ...
+    position(1), ...
+    position(2), ...
+    'o', ...
+    'MarkerSize',5, ...
+    'MarkerFaceColor','w', ...
+    'MarkerEdgeColor','w');
+
+%% Rover front direction
+
+roverFront = plot(ax, ...
+    position(1), ...
+    position(2), ...
+    '>', ...
+    'MarkerSize',10, ...
+    'LineWidth',2);
+
+%% ================================================================
+% ROVER WHEELS
+%% ================================================================
+
+wheel1 = plot(ax,position(1),position(2),'o','MarkerSize',5,'LineWidth',1.5);
+wheel2 = plot(ax,position(1),position(2),'o','MarkerSize',5,'LineWidth',1.5);
+wheel3 = plot(ax,position(1),position(2),'o','MarkerSize',5,'LineWidth',1.5);
+wheel4 = plot(ax,position(1),position(2),'o','MarkerSize',5,'LineWidth',1.5);
+
+%% ================================================================
+% LiDAR RAYS
+%% ================================================================
+
+angles = linspace(0,2*pi,numRays+1);
+angles(end) = [];
+
+lidarLines = gobjects(numRays,1);
+
+for i = 1:numRays
+
+    lidarLines(i) = plot(ax, ...
+        [position(1) position(1)], ...
+        [position(2) position(2)], ...
+        '-', ...
+        'LineWidth',0.45);
+
+end
+
+%% ================================================================
+% LIDAR SCAN POINTS
+%% ================================================================
+
+lidarPoints = plot(ax, ...
+    position(1), ...
+    position(2), ...
+    '.', ...
+    'MarkerSize',5);
+
+%% ================================================================
+% ROVER TRAIL
+%% ================================================================
+
+trailX = position(1);
+trailY = position(2);
+
+trail = plot(ax, ...
+    trailX, ...
+    trailY, ...
+    '--', ...
+    'LineWidth',1.2);
+
+%% ================================================================
+% STATUS PANEL
+%% ================================================================
+
+statusText = text(ax, ...
+    3, ...
+    mapH-3, ...
+    'MODE: AUTONOMOUS | LiDAR: ACTIVE | A*: ACTIVE', ...
+    'Color','w', ...
+    'FontSize',11, ...
+    'FontWeight','bold', ...
+    'BackgroundColor',[0.05 0.05 0.05], ...
+    'Margin',5);
+
+%% ================================================================
+% INFORMATION PANEL
+%% ================================================================
+
+infoText = text(ax, ...
+    3, ...
+    3, ...
+    '', ...
+    'Color','w', ...
+    'FontSize',9, ...
+    'VerticalAlignment','bottom', ...
+    'BackgroundColor',[0.05 0.05 0.05], ...
+    'Margin',5);
+
+%% ================================================================
+% SIMULATION INITIALIZATION
+%% ================================================================
+
+pathIndex = 2;
+
+if size(path,1) < 2
+
+    pathIndex = 1;
+
+end
+
+distanceTravelled = 0;
+replanCount = 0;
+obstacleCount = 0;
+simulationTime = 0;
+
+missionComplete = false;
+
+lastObstacleState = false;
+
+%% ================================================================
+% COMMAND WINDOW INFORMATION
+%% ================================================================
+
+disp(' ');
+disp('==============================================================');
+disp('              MINENOVA AUTONOMOUS RESCUE');
+disp('==============================================================');
+disp(' ');
+disp('LiDAR              : ACTIVE');
+disp('Occupancy Grid     : ACTIVE');
+disp('A* Path Planner    : ACTIVE');
+disp('Obstacle Avoidance : ACTIVE');
+disp('Navigation Mode    : AUTONOMOUS');
+disp('Survivor Detection : TARGET LOCATION');
+disp(' ');
+disp('Starting simulation...');
+disp('==============================================================');
+disp(' ');
+
+%% ================================================================
+% MAIN SIMULATION LOOP
+%% ================================================================
+
+maxIterations = 30000;
+
+for iteration = 1:maxIterations
+
+    %% ------------------------------------------------------------
+    % STOP IF FIGURE CLOSED
+    %% ------------------------------------------------------------
+
+    if ~isvalid(fig)
+
+        disp('Simulation window closed.');
+        break;
+
+    end
+
+    %% ------------------------------------------------------------
+    % UPDATE SIMULATION TIME
+    %% ------------------------------------------------------------
+
+    simulationTime = simulationTime + dt;
+
+    %% ------------------------------------------------------------
+    % 1. LiDAR SCANNING
+    %% ------------------------------------------------------------
+
+    ranges = zeros(1,numRays);
+
+    for r = 1:numRays
+
+        ranges(r) = lidarRay( ...
+            position, ...
+            angles(r), ...
+            lidarRange, ...
+            lidarStep, ...
+            map);
+
+    end
+
+    %% ------------------------------------------------------------
+    % UPDATE LiDAR GRAPHICS
+    %% ------------------------------------------------------------
+
+    scanX = zeros(1,numRays);
+    scanY = zeros(1,numRays);
+
+    for r = 1:numRays
+
+        ex = position(1) + ...
+            ranges(r)*cos(angles(r));
+
+        ey = position(2) + ...
+            ranges(r)*sin(angles(r));
+
+        scanX(r) = ex;
+        scanY(r) = ey;
+
+        set(lidarLines(r), ...
+            'XData',[position(1) ex], ...
+            'YData',[position(2) ey]);
+
+    end
+
+    set(lidarPoints, ...
+        'XData',scanX, ...
+        'YData',scanY);
+
+    %% ------------------------------------------------------------
+    % 2. SELECT CURRENT WAYPOINT
+    %% ------------------------------------------------------------
+
+    if pathIndex <= size(path,1)
+
+        target = path(pathIndex,:);
+
+    else
+
+        target = goal;
+
+    end
+
+    %% ------------------------------------------------------------
+    % 3. CHECK WAYPOINT
+    %% ------------------------------------------------------------
+
+    distanceToWaypoint = norm(position-target);
+
+    if distanceToWaypoint < pathWaypointTolerance
+
+        pathIndex = pathIndex + 1;
+
+        if pathIndex <= size(path,1)
+
+            target = path(pathIndex,:);
+
+        else
+
+            target = goal;
+
+        end
+
+    end
+
+    %% ------------------------------------------------------------
+    % 4. CHECK SURVIVOR DISTANCE
+    %% ------------------------------------------------------------
+
+    distanceToGoal = norm(position-goal);
+
+    if distanceToGoal <= goalTolerance
+
+        missionComplete = true;
+
+        set(statusText, ...
+            'String','MISSION COMPLETE | SURVIVOR REACHED', ...
+            'FontSize',12);
+
+        disp(' ');
+        disp('==============================================================');
+        disp('             MINENOVA MISSION COMPLETE');
+        disp('==============================================================');
+        fprintf('Survivor reached at X = %.2f m, Y = %.2f m\n', ...
+            position(1),position(2));
+        fprintf('Distance travelled    = %.2f m\n', ...
+            distanceTravelled);
+        fprintf('Simulation time       = %.2f s\n', ...
+            simulationTime);
+        fprintf('A* replanning count   = %d\n', ...
+            replanCount);
+        fprintf('Obstacles detected    = %d\n', ...
+            obstacleCount);
+        disp('==============================================================');
+        disp(' ');
+
+        break;
+
+    end
+
+    %% ------------------------------------------------------------
+    % 5. CALCULATE HEADING TOWARD TARGET
+    %% ------------------------------------------------------------
+
+    direction = target-position;
+
+    if norm(direction) > 0.001
+
+        desiredHeading = atan2( ...
+            direction(2), ...
+            direction(1));
+
+        headingError = angleDifference( ...
+            desiredHeading, ...
+            heading);
+
+        maxTurnPerStep = 0.18;
+
+        turnAmount = max( ...
+            -maxTurnPerStep, ...
+            min(maxTurnPerStep,headingError));
+
+        heading = heading + turnAmount;
+
+    end
+
+    %% ------------------------------------------------------------
+    % 6. DETECT OBSTACLE IN FRONT
+    %% ------------------------------------------------------------
+
+    angleDifferenceVector = zeros(1,numRays);
+
+    for r = 1:numRays
+
+        angleDifferenceVector(r) = ...
+            angleDifference(angles(r),heading);
+
+    end
+
+    frontAngles = ...
+        abs(angleDifferenceVector) <= deg2rad(frontAngleDeg);
+
+    frontRanges = ranges(frontAngles);
+
+    if isempty(frontRanges)
+
+        minimumFrontRange = lidarRange;
+
+    else
+
+        minimumFrontRange = min(frontRanges);
+
+    end
+
+    obstacleAhead = ...
+        minimumFrontRange < frontDetectionRange;
+
+    %% ------------------------------------------------------------
+    % COUNT NEW OBSTACLE DETECTION
+    %% ------------------------------------------------------------
+
+    if obstacleAhead && ~lastObstacleState
+
+        obstacleCount = obstacleCount + 1;
+
+    end
+
+    lastObstacleState = obstacleAhead;
+
+    %% ------------------------------------------------------------
+    % 7. AUTONOMOUS OBSTACLE AVOIDANCE
+    %% ------------------------------------------------------------
+
+    if obstacleAhead
+
+        set(statusText, ...
+            'String','AUTONOMOUS | LiDAR OBSTACLE DETECTED | A* REPLANNING...');
+
+        %% Re-plan from current position
+
+        currentGridPosition = ...
+            [round(position(1)) round(position(2))];
+
+        %% Make sure current point is free
+
+        replanningMap = inflatedMap;
+
+        replanningMap = ...
+            clearCircleFromMap( ...
+            replanningMap, ...
+            currentGridPosition, ...
+            2);
+
+        replanningMap = ...
+            clearCircleFromMap( ...
+            replanningMap, ...
+            goal, ...
+            2);
+
+        newPath = astarPath( ...
+            replanningMap, ...
+            currentGridPosition, ...
+            goal);
+
+        if ~isempty(newPath) && size(newPath,1) >= 1
+
+            path = newPath;
+
+            pathIndex = min(2,size(path,1));
+
+            replanCount = replanCount + 1;
+
+            %% Update planned path without deleting trail
+
+            if isvalid(plannedPathPlot)
+
+                set(plannedPathPlot, ...
+                    'XData',path(:,1), ...
+                    'YData',path(:,2));
+
+            end
+
+        else
+
+            %% ----------------------------------------------------
+            % EMERGENCY AVOIDANCE
+            %% ----------------------------------------------------
+
+            heading = heading + emergencyTurnAngle;
+
+        end
+
+    else
+
+        set(statusText, ...
+            'String','AUTONOMOUS | LiDAR SCANNING | PATH CLEAR');
+
+    end
+
+    %% ------------------------------------------------------------
+    % 8. MOVE ROVER
+    %% ------------------------------------------------------------
+
+    movementDirection = ...
+        [cos(heading),sin(heading)];
+
+    movementDistance = ...
+        roverSpeed * dt;
+
+    proposedPosition = ...
+        position + movementDistance * movementDirection;
+
+    %% ------------------------------------------------------------
+    % COLLISION PROTECTION
+    %% ------------------------------------------------------------
+
+    if isFreePosition( ...
+            proposedPosition, ...
+            map, ...
+            roverRadius)
+
+        actualMovement = ...
+            norm(proposedPosition-position);
+
+        position = proposedPosition;
+
+        distanceTravelled = ...
+            distanceTravelled + actualMovement;
+
+    else
+
+        %% Collision detected
+
+        obstacleCount = obstacleCount + 1;
+
+        %% Try left turn
+
+        testHeading1 = heading + pi/2;
+
+        testPosition1 = ...
+            position + ...
+            movementDistance * ...
+            [cos(testHeading1),sin(testHeading1)];
+
+        if isFreePosition( ...
+                testPosition1, ...
+                map, ...
+                roverRadius)
+
+            heading = testHeading1;
+
+        else
+
+            %% Try right turn
+
+            testHeading2 = heading - pi/2;
+
+            testPosition2 = ...
+                position + ...
+                movementDistance * ...
+                [cos(testHeading2),sin(testHeading2)];
+
+            if isFreePosition( ...
+                    testPosition2, ...
+                    map, ...
+                    roverRadius)
+
+                heading = testHeading2;
+
+            else
+
+                %% Reverse direction
+
+                heading = heading + pi;
+
+            end
+
+        end
+
+    end
+
+    %% ------------------------------------------------------------
+    % 9. UPDATE ROVER BODY
+    %% ------------------------------------------------------------
+
+    set(roverBody, ...
+        'Position',[ ...
+        position(1)-roverBodySize/2, ...
+        position(2)-roverBodySize/2, ...
+        roverBodySize, ...
+        roverBodySize]);
+
+    %% Rover center
+
+    set(roverCenter, ...
+        'XData',position(1), ...
+        'YData',position(2));
+
+    %% Rover front
+
+    set(roverFront, ...
+        'XData',position(1), ...
+        'YData',position(2), ...
+        'Marker',directionMarker(heading));
+
+    %% ------------------------------------------------------------
+    % 10. UPDATE WHEELS
+    %% ------------------------------------------------------------
+
+    wheelOffsetForward = 0.9;
+    wheelOffsetSide = 1.0;
+
+    forwardVector = ...
+        [cos(heading),sin(heading)];
+
+    sideVector = ...
+        [-sin(heading),cos(heading)];
+
+    wheelPositions = zeros(4,2);
+
+    wheelPositions(1,:) = ...
+        position + ...
+        wheelOffsetForward*forwardVector + ...
+        wheelOffsetSide*sideVector;
+
+    wheelPositions(2,:) = ...
+        position + ...
+        wheelOffsetForward*forwardVector - ...
+        wheelOffsetSide*sideVector;
+
+    wheelPositions(3,:) = ...
+        position - ...
+        wheelOffsetForward*forwardVector + ...
+        wheelOffsetSide*sideVector;
+
+    wheelPositions(4,:) = ...
+        position - ...
+        wheelOffsetForward*forwardVector - ...
+        wheelOffsetSide*sideVector;
+
+    set(wheel1, ...
+        'XData',wheelPositions(1,1), ...
+        'YData',wheelPositions(1,2));
+
+    set(wheel2, ...
+        'XData',wheelPositions(2,1), ...
+        'YData',wheelPositions(2,2));
+
+    set(wheel3, ...
+        'XData',wheelPositions(3,1), ...
+        'YData',wheelPositions(3,2));
+
+    set(wheel4, ...
+        'XData',wheelPositions(4,1), ...
+        'YData',wheelPositions(4,2));
+
+    %% ------------------------------------------------------------
+    % 11. UPDATE TRAIL
+    %% ------------------------------------------------------------
+
+    trailX(end+1) = position(1);
+    trailY(end+1) = position(2);
+
+    set(trail, ...
+        'XData',trailX, ...
+        'YData',trailY);
+
+    %% ------------------------------------------------------------
+    % 12. UPDATE INFORMATION PANEL
+    %% ------------------------------------------------------------
+
+    infoString = sprintf([ ...
+        'ROVER X: %.1f m   Y: %.1f m   |   ' ...
+        'LiDAR: %.1f m   |   ' ...
+        'Goal: %.1f m   |   ' ...
+        'Distance: %.1f m   |   ' ...
+        'Replans: %d'], ...
+        position(1), ...
+        position(2), ...
+        minimumFrontRange, ...
+        distanceToGoal, ...
+        distanceTravelled, ...
+        replanCount);
+
+    set(infoText, ...
+        'String',infoString);
+
+    %% ------------------------------------------------------------
+    % 13. DISPLAY
+    %% ------------------------------------------------------------
+
+    drawnow limitrate;
+
+    pause(0.01);
+
+end
+
+%% ================================================================
+% FINISH
+%% ================================================================
+
+if ~missionComplete
+
+    disp(' ');
+    disp('==============================================================');
+    disp('MINENOVA SIMULATION STOPPED');
+    disp('==============================================================');
+    fprintf('Final position: X = %.2f m, Y = %.2f m\n', ...
+        position(1),position(2));
+    fprintf('Distance travelled: %.2f m\n', ...
+        distanceTravelled);
+    fprintf('Replanning events: %d\n', ...
+        replanCount);
+    disp('==============================================================');
+
+end
+
+%% ================================================================
+% FINAL ROVER MARKER
+%% ================================================================
+
+if isvalid(ax)
+
+    plot(ax, ...
+        position(1), ...
+        position(2), ...
+        'o', ...
+        'MarkerSize',14, ...
+        'LineWidth',2);
+
+    if missionComplete
+
+        text(ax, ...
+            position(1)+2, ...
+            position(2)+2, ...
+            'SURVIVOR REACHED!', ...
+            'Color','w', ...
+            'FontSize',12, ...
+            'FontWeight','bold');
+
+    end
+
+end
+
+%% ================================================================
+% LOCAL FUNCTION 1
+% LiDAR ray casting
+%% ================================================================
+
+function distance = lidarRay( ...
+    pos, ...
+    angle, ...
+    maxRange, ...
+    stepSize, ...
+    map)
+
+distance = maxRange;
+
+for r = 0:stepSize:maxRange
+
+    x = round( ...
+        pos(1) + r*cos(angle));
+
+    y = round( ...
+        pos(2) + r*sin(angle));
+
+    %% Outside map
+
+    if x < 1 || ...
+       y < 1 || ...
+       x > size(map,2) || ...
+       y > size(map,1)
+
+        distance = r;
+        return;
+
+    end
+
+    %% Obstacle detected
+
+    if map(y,x) == 1
+
+        distance = r;
+        return;
+
+    end
+
+end
+
+end
+
+%% ================================================================
+% LOCAL FUNCTION 2
+% Inflate obstacle map
+%% ================================================================
+
+function inflated = inflateMap(map,radius)
+
+inflated = map;
+
+[height,width] = size(map);
+
+obstacleLocations = find(map == 1);
+
+for i = 1:length(obstacleLocations)
+
+    [y,x] = ind2sub( ...
+        [height width], ...
+        obstacleLocations(i));
+
+    x1 = max(1,x-radius);
+    x2 = min(width,x+radius);
+
+    y1 = max(1,y-radius);
+    y2 = min(height,y+radius);
+
+    inflated(y1:y2,x1:x2) = 1;
+
+end
+
+end
+
+%% ================================================================
+% LOCAL FUNCTION 3
+% Check if rover position is free
+%% ================================================================
+
+function free = isFreePosition(pos,map,radius)
+
+x = round(pos(1));
+y = round(pos(2));
+
+free = true;
+
+[height,width] = size(map);
+
+%% Boundary check
+
+if x-radius < 1 || ...
+   y-radius < 1 || ...
+   x+radius > width || ...
+   y+radius > height
+
+    free = false;
+    return;
+
+end
+
+%% Circular rover collision check
+
+for yy = y-radius:y+radius
+
+    for xx = x-radius:x+radius
+
+        distance = sqrt( ...
+            (xx-x)^2 + ...
+            (yy-y)^2);
+
+        if distance <= radius
+
+            if map(yy,xx) == 1
+
+                free = false;
+                return;
+
+            end
+
+        end
+
+    end
+
+end
+
+end
+
+%% ================================================================
+% LOCAL FUNCTION 4
+% Clear circular area
+%% ================================================================
+
+function outputMap = clearCircleFromMap(map,center,radius)
+
+outputMap = map;
+
+cx = round(center(1));
+cy = round(center(2));
+
+[height,width] = size(map);
+
+for y = max(1,cy-radius):min(height,cy+radius)
+
+    for x = max(1,cx-radius):min(width,cx+radius)
+
+        if sqrt((x-cx)^2+(y-cy)^2) <= radius
+
+            outputMap(y,x) = 0;
+
+        end
+
+    end
+
+end
+
+end
+
+%% ================================================================
+% LOCAL FUNCTION 5
+% A* PATH PLANNER
+%% ================================================================
+
+function path = astarPath(map,start,goal)
+
+start = round(start);
+goal = round(goal);
+
+[height,width] = size(map);
+
+path = [];
+
+%% Validate coordinates
+
+if start(1) < 1 || ...
+   start(1) > width || ...
+   start(2) < 1 || ...
+   start(2) > height
+
+    return;
+
+end
+
+if goal(1) < 1 || ...
+   goal(1) > width || ...
+   goal(2) < 1 || ...
+   goal(2) > height
+
+    return;
+
+end
+
+%% Start / goal blocked
+
+if map(start(2),start(1)) == 1 || ...
+   map(goal(2),goal(1)) == 1
+
+    return;
+
+end
+
+%% ---------------------------------------------------------------
+% A* arrays
+%% ---------------------------------------------------------------
+
+gScore = inf(height,width);
+fScore = inf(height,width);
+
+parentX = zeros(height,width);
+parentY = zeros(height,width);
+
+closedSet = false(height,width);
+
+gScore(start(2),start(1)) = 0;
+
+fScore(start(2),start(1)) = ...
+    heuristic(start,goal);
+
+openX = start(1);
+openY = start(2);
+
+%% 8-connected movement
+
+directions = [ ...
+     1  0;
+    -1  0;
+     0  1;
+     0 -1;
+     1  1;
+     1 -1;
+    -1  1;
+    -1 -1];
+
+%% ---------------------------------------------------------------
+% A* loop
+%% ---------------------------------------------------------------
+
+while ~isempty(openX)
+
+    %% Find node with minimum f-score
+
+    bestIndex = 1;
+    bestF = inf;
+
+    for i = 1:length(openX)
+
+        fx = openX(i);
+        fy = openY(i);
+
+        if fScore(fy,fx) < bestF
+
+            bestF = fScore(fy,fx);
+            bestIndex = i;
+
+        end
+
+    end
+
+    currentX = openX(bestIndex);
+    currentY = openY(bestIndex);
+
+    %% Remove current node from open set
+
+    openX(bestIndex) = [];
+    openY(bestIndex) = [];
+
+    %% Goal reached
+
+    if currentX == goal(1) && ...
+       currentY == goal(2)
+
+        path = reconstructPath( ...
+            parentX, ...
+            parentY, ...
+            start, ...
+            goal);
+
+        return;
+
+    end
+
+    closedSet(currentY,currentX) = true;
+
+    %% Examine neighbours
+
+    for d = 1:size(directions,1)
+
+        neighborX = ...
+            currentX + directions(d,1);
+
+        neighborY = ...
+            currentY + directions(d,2);
+
+        %% Boundary
+
+        if neighborX < 1 || ...
+           neighborX > width || ...
+           neighborY < 1 || ...
+           neighborY > height
+
+            continue;
+
+        end
+
+        %% Obstacle
+
+        if map(neighborY,neighborX) == 1
+
+            continue;
+
+        end
+
+        %% Already processed
+
+        if closedSet(neighborY,neighborX)
+
+            continue;
+
+        end
+
+        %% Prevent diagonal corner cutting
+
+        if abs(directions(d,1)) == 1 && ...
+           abs(directions(d,2)) == 1
+
+            side1 = map( ...
+                currentY, ...
+                neighborX);
+
+            side2 = map( ...
+                neighborY, ...
+                currentX);
+
+            if side1 == 1 || side2 == 1
+
+                continue;
+
+            end
+
+        end
+
+        %% Movement cost
+
+        movementCost = ...
+            sqrt( ...
+            directions(d,1)^2 + ...
+            directions(d,2)^2);
+
+        tentativeG = ...
+            gScore(currentY,currentX) + movementCost;
+
+        %% Better path?
+
+        if tentativeG < ...
+                gScore(neighborY,neighborX)
+
+            parentX(neighborY,neighborX) = currentX;
+            parentY(neighborY,neighborX) = currentY;
+
+            gScore(neighborY,neighborX) = tentativeG;
+
+            fScore(neighborY,neighborX) = ...
+                tentativeG + ...
+                heuristic( ...
+                [neighborX neighborY], ...
+                goal);
+
+            %% Add to open set if not already there
+
+            alreadyOpen = false;
+
+            for j = 1:length(openX)
+
+                if openX(j) == neighborX && ...
+                   openY(j) == neighborY
+
+                    alreadyOpen = true;
+                    break;
+
+                end
+
+            end
+
+            if ~alreadyOpen
+
+                openX(end+1) = neighborX;
+                openY(end+1) = neighborY;
+
+            end
+
+        end
+
+    end
+
+end
+
+end
+
+%% ================================================================
+% LOCAL FUNCTION 6
+% A* heuristic
+%% ================================================================
+
+function h = heuristic(point,goal)
+
+dx = abs(point(1)-goal(1));
+dy = abs(point(2)-goal(2));
+
+h = sqrt(dx^2 + dy^2);
+
+end
+
+%% ================================================================
+% LOCAL FUNCTION 7
+% Reconstruct A* path
+%% ================================================================
+
+function path = reconstructPath( ...
+    parentX, ...
+    parentY, ...
+    start, ...
+    goal)
+
+current = goal;
+
+path = current;
+
+maxSteps = numel(parentX);
+
+steps = 0;
+
+while ~(current(1) == start(1) && ...
+        current(2) == start(2))
+
+    steps = steps + 1;
+
+    if steps > maxSteps
+
+        path = [];
+        return;
+
+    end
+
+    px = parentX(current(2),current(1));
+    py = parentY(current(2),current(1));
+
+    if px == 0 && py == 0
+
+        path = [];
+        return;
+
+    end
+
+    current = [px py];
+
+    path(end+1,:) = current;
+
+end
+
+path = flipud(path);
+
+end
+
+%% ================================================================
+% LOCAL FUNCTION 8
+% Angle difference without wrapToPi
+%% ================================================================
+
+function difference = angleDifference(a,b)
+
+difference = mod(a-b+pi,2*pi)-pi;
+
+end
+
+%% ================================================================
+% LOCAL FUNCTION 9
+% Rover direction marker
+%% ================================================================
+
+function marker = directionMarker(theta)
+
+theta = mod(theta,2*pi);
+
+if theta < pi/8 || theta >= 15*pi/8
+
+    marker = '>';
+
+elseif theta < 3*pi/8
+
+    marker = '^';
+
+elseif theta < 5*pi/8
+
+    marker = '^';
+
+elseif theta < 7*pi/8
+
+    marker = '^';
+
+elseif theta < 9*pi/8
+
+    marker = '<';
+
+elseif theta < 11*pi/8
+
+    marker = 'v';
+
+elseif theta < 13*pi/8
+
+    marker = 'v';
+
+else
+
+    marker = 'v';
+
+end
+
+end
+
+%% ================================================================
+% LOCAL FUNCTION 10
+% Draw rock markers
+%% ================================================================
+
+function drawRockMarkers(ax,map)
+
+[height,width] = size(map);
+
+%% Sample obstacle cells
+
+for y = 2:height-1
+
+    for x = 2:width-1
+
+        if map(y,x) == 1
+
+            %% Only draw selected cells
+            if mod(x+y,7) == 0
+
+                plot(ax, ...
+                    x, ...
+                    y, ...
+                    '.', ...
+                    'MarkerSize',5);
+
+            end
+
+        end
+
+    end
+
+end
+
+end
+
+%% ================================================================
+% END OF MINENOVA PROGRAM
+%% ================================================================
